@@ -241,10 +241,11 @@ function segHTML(s) {
   const ts = `<span class="ts">${fmtT(s.t)}</span>`;
   let src, tr;
   if (s.st === "asr") { src = '<span class="wait">识别中…</span>'; tr = ""; }
+  else if (s.st === "miss") { src = '<span class="wait">（这段有人说话，但没识别出来）</span>'; tr = `<button class="btn retry" data-i="${s.i}">再识别一次</button>`; }
   else src = esc(s.src);
   if (s.st === "mt") tr = '<span class="wait">翻译中…</span>';
   else if (s.st === "err") tr = `<span class="wait">${esc(s.err || "失败")}</span><br><button class="btn retry" data-i="${s.i}">重试</button>`;
-  else if (s.st !== "asr") tr = esc(s.tr);
+  else if (s.st !== "asr" && s.st !== "miss") tr = esc(s.tr);
   return `<div class="src">${ts}${src}</div><div class="tr">${tr}</div>`;
 }
 function renderSeg(s) {
@@ -372,9 +373,9 @@ function wireAudio() {
   A.proc.onaudioprocess = (e) => { if (!A || A.paused) return; A.seg.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
   stream.getAudioTracks()[0].onended = () => { if (A && cur?.live) recoverAudio("麦克风被系统中断了"); };
 }
-function onSegment(f32, durMs, startMs) {
+function onSegment(f32, durMs, startMs, speechMs) {
   const wav = encodeWav(normalize(downsample(f32, A.ctx.sampleRate, 16000)), 16000);
-  const s = { i: cur.session.segs.length, t: Math.max(0, startMs), dur: durMs, src: "", tr: "", st: "asr" };
+  const s = { i: cur.session.segs.length, t: Math.max(0, startMs), dur: durMs, voice: speechMs, src: "", tr: "", st: "asr" };
   cur.session.segs.push(s); blobs[s.i] = wav;
   renderSeg(s); saveSession(); processSeg(s, cur);
 }
@@ -391,7 +392,11 @@ async function processSeg(s, ctxCur) {
       s.st = "asr"; visible() && renderSeg(s);
       const text = clean(await transcribe(blobs[s.i], crs, prevSrc(session, s.i, 300)));
       session.audioSec += s.dur / 1000;
-      if (!text) { s.st = "empty"; delete blobs[s.i]; visible() && renderSeg(s); saveSession(); return; }
+      if (!text) {
+        // Real speech but nothing recognized: say so instead of silently dropping it
+        if ((s.voice || 0) > 2000) { s.st = "miss"; } else { s.st = "empty"; delete blobs[s.i]; }
+        visible() && renderSeg(s); saveSession(); return;
+      }
       s.src = text;
     }
     s.st = "mt"; s.err = ""; visible() && renderSeg(s); saveSession();

@@ -4,15 +4,15 @@
 class Segmenter {
   constructor(sampleRate, onSegment, opts = {}) {
     this.rate = sampleRate;
-    this.onSegment = onSegment;          // (float32Array, durationMs, startMs) => void
+    this.onSegment = onSegment;          // (float32Array, durationMs, startMs, speechMs) => void
     this.o = Object.assign({
-      minSegMs: 2500,     // don't cut before this much audio
-      pauseMs: 650,       // a pause this long ends a sentence
-      longSegMs: 12000,   // after this, a shorter pause is enough
-      shortPauseMs: 250,
-      maxSegMs: 20000,    // hard cut
-      minSpeechMs: 400,   // less speech than this = noise, discard
-      leadMs: 400,        // keep this much audio before speech starts
+      minSegMs: 5000,     // don't cut before this much audio (longer = better recognition)
+      pauseMs: 700,       // a pause this long ends a segment
+      longSegMs: 14000,   // after this, a shorter pause is enough
+      shortPauseMs: 180,
+      maxSegMs: 28000,    // hard cut (rare: only for nonstop talk)
+      minSpeechMs: 250,   // a segment with less detected voice than this is pure silence
+      leadMs: 1000,       // keep up to 1 s of audio before the first detected voice
       absThresh: 0.0012,  // minimum level that can count as speech
       mult: 1.8,          // speech must be this many times above the noise floor
     }, opts);
@@ -40,36 +40,34 @@ class Segmenter {
     this.frames.push(frame); this.segMs += ms; this.clock += ms;
     if (speech) { this.speechMs += ms; this.silenceMs = 0; } else this.silenceMs += ms;
 
-    // no speech yet: keep only a short lead-in
+    // Only while there has been NO voice at all: keep a 1 s lead-in, drop older pure silence
     if (this.speechMs === 0) {
-      while (this.segMs - this.frames[0].length / this.rate * 1000 >= this.o.leadMs && this.frames.length > 1) {
+      while (this.frames.length > 1 && this.segMs - this.frames[0].length / this.rate * 1000 >= this.o.leadMs) {
         this.segMs -= this.frames.shift().length / this.rate * 1000;
       }
       this.startMs = this.clock - this.segMs;
       return;
     }
-    // a short blip followed by long silence: discard
-    if (this.speechMs < this.o.minSpeechMs && this.silenceMs > 1500) { this.reset(); return; }
-
+    // Everything after the first voice is kept; cut only at pauses
     const o = this.o;
     const cut = (this.segMs >= o.minSegMs && this.silenceMs >= o.pauseMs) ||
                 (this.segMs >= o.longSegMs && this.silenceMs >= o.shortPauseMs) ||
                 (this.segMs >= o.maxSegMs);
-    if (cut && this.speechMs >= o.minSpeechMs) this.flush();
+    if (cut) this.flush();
   }
   flush() {
     if (this.speechMs >= this.o.minSpeechMs && this.frames.length) {
-      // trim trailing silence beyond 300 ms
+      // trim trailing silence beyond 400 ms
       let trailing = this.silenceMs, frames = this.frames;
-      while (trailing > 300 && frames.length > 1) {
+      while (trailing > 400 && frames.length > 1) {
         const fms = frames[frames.length - 1].length / this.rate * 1000;
-        if (trailing - fms < 300) break;
+        if (trailing - fms < 400) break;
         frames = frames.slice(0, -1); trailing -= fms;
       }
       let len = 0; frames.forEach(f => len += f.length);
       const out = new Float32Array(len); let off = 0;
       frames.forEach(f => { out.set(f, off); off += f.length; });
-      this.onSegment(out, len / this.rate * 1000, this.startMs);
+      this.onSegment(out, len / this.rate * 1000, this.startMs, this.speechMs);
     }
     this.reset();
   }
