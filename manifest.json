@@ -1,0 +1,9 @@
+{
+  "name": "课堂翻译",
+  "short_name": "课堂翻译",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f7f5f1",
+  "theme_color": "#f7f5f1",
+  "icons": [{ "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }]
+}
