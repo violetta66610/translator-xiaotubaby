@@ -11,6 +11,7 @@ const ASR_PRICE = { "gpt-transcribe": 0.0045, "gpt-4o-transcribe": 0.006, "gpt-4
 const ASR_PREFS = ["gpt-transcribe", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"];
 const LLM_PREFS = ["gpt-5.4-mini", "gpt-5.6-terra", "gpt-5-mini", "gpt-4.1-mini", "gpt-4o-mini"];
 const EFFORTS = ["none", "minimal", "low", null];
+const MIC = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -22,7 +23,7 @@ const fmtDate = (t) => new Date(t).toLocaleString("zh-CN", { month: "long", day:
 /* ---------------- settings ---------------- */
 let S = {};
 try { S = JSON.parse(localStorage.getItem("lt.settings") || "{}"); } catch (e) {}
-S.models = S.models || {}; S.effortIdx = S.effortIdx || 0; S.fs = S.fs || 18;
+S.models = S.models || {}; S.effortIdx = S.effortIdx || 0; S.fs = S.fs || 18; S.sens = S.sens || "high";
 const saveS = () => { try { localStorage.setItem("lt.settings", JSON.stringify(S)); } catch (e) {} };
 document.documentElement.style.setProperty("--fs", S.fs + "px");
 
@@ -269,7 +270,7 @@ function showTranscript(session, crs, live) {
   $("colTr").textContent = "译文 · " + LANG[crs.tgt].name;
   $("feed").innerHTML = ""; $("banners").innerHTML = "";
   session.segs.forEach((s) => s.st !== "empty" && renderSeg(s));
-  ["recInd", "meter", "pauseBtn", "stopBtn", "listening"].forEach((id) => $(id).classList.toggle("hidden", !live));
+  ["recInd", "meter", "sensSel", "pauseBtn", "stopBtn", "listening"].forEach((id) => $(id).classList.toggle("hidden", !live));
   ["copyBtn", "dlBtn", "delBtn"].forEach((id) => $(id).classList.toggle("hidden", live));
   updateStat();
   go("live");
@@ -285,6 +286,11 @@ async function openSession(id) { const s = await db.get("sessions", id); if (s) 
 $("liveBack").onclick = async () => {
   if (cur?.live) { if (!confirm("结束这节课并保存？")) return; await stopClass(); }
   openCourse(cur.course.id);
+};
+$("sensSel").value = S.sens;
+$("sensSel").onchange = () => {
+  S.sens = $("sensSel").value; saveS();
+  if (A?.seg) { A.seg.o.absThresh = SENS[S.sens][0]; A.seg.o.mult = SENS[S.sens][1]; }
 };
 $("fsUp").onclick = () => { S.fs = Math.min(30, S.fs + 2); document.documentElement.style.setProperty("--fs", S.fs + "px"); saveS(); };
 $("fsDown").onclick = () => { S.fs = Math.max(13, S.fs - 2); document.documentElement.style.setProperty("--fs", S.fs + "px"); saveS(); };
@@ -327,7 +333,7 @@ async function startClass() {
   ctx.resume().catch(() => {});   // must be called synchronously inside the tap on iOS
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    stream = await navigator.mediaDevices.getUserMedia(MIC);
   } catch (e) {
     ctx.close();
     return alert("没有麦克风权限。请在「设置 → Safari → 麦克风」里允许，或者在地址栏左边的 ᴀA 菜单里允许本网站使用麦克风。");
@@ -340,9 +346,19 @@ async function startClass() {
   showTranscript(session, course, true);
   A = { ctx, stream, paused: false };
   wireAudio();
-  statT = setInterval(() => { updateStat(); $("meter").firstChild.style.width = Math.min(100, (A?.seg?.level || 0) * 900) + "%"; }, 120);
+  statT = setInterval(updateMeter, 120);
   acquireWake();
   $("pauseBtn").textContent = "暂停"; $("recInd").classList.remove("paused"); $("recText").textContent = "录音中";
+}
+const dbPct = (x) => Math.max(0, Math.min(100, (20 * Math.log10(Math.max(x, 1e-6)) + 66) / 56 * 100));
+function updateMeter() {
+  updateStat();
+  if (!A?.seg) return;
+  const bar = $("meter").querySelector("i"), mark = $("meter").querySelector("b");
+  bar.style.width = dbPct(A.seg.level) + "%";
+  bar.style.background = A.seg.speaking ? "var(--accent)" : "var(--muted)";
+  mark.style.left = dbPct(A.seg.thr || 0) + "%";
+  $("listening").textContent = A.paused ? "" : (A.seg.speaking ? "正在听…（听到声音了）" : "正在听…");
 }
 function wireAudio() {
   const { ctx, stream } = A;
@@ -351,13 +367,13 @@ function wireAudio() {
   A.mute = ctx.createGain(); A.mute.gain.value = 0;
   A.srcNode.connect(A.proc); A.proc.connect(A.mute); A.mute.connect(ctx.destination);
   const offset = Date.now() - cur.session.start;
-  A.seg = new Segmenter(ctx.sampleRate, onSegment);
+  A.seg = new Segmenter(ctx.sampleRate, onSegment, { absThresh: SENS[S.sens][0], mult: SENS[S.sens][1] });
   A.seg.clock = offset; A.seg.reset();
   A.proc.onaudioprocess = (e) => { if (!A || A.paused) return; A.seg.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
   stream.getAudioTracks()[0].onended = () => { if (A && cur?.live) recoverAudio("麦克风被系统中断了"); };
 }
 function onSegment(f32, durMs, startMs) {
-  const wav = encodeWav(downsample(f32, A.ctx.sampleRate, 16000), 16000);
+  const wav = encodeWav(normalize(downsample(f32, A.ctx.sampleRate, 16000)), 16000);
   const s = { i: cur.session.segs.length, t: Math.max(0, startMs), dur: durMs, src: "", tr: "", st: "asr" };
   cur.session.segs.push(s); blobs[s.i] = wav;
   renderSeg(s); saveSession(); processSeg(s, cur);
@@ -440,7 +456,7 @@ async function recoverAudio(reason) {
   try {
     const track = A.stream.getAudioTracks()[0];
     if (!track || track.readyState === "ended") {
-      A.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+      A.stream = await navigator.mediaDevices.getUserMedia(MIC);
       try { A.proc.disconnect(); A.srcNode.disconnect(); } catch (e) {}
       wireAudio();
     }

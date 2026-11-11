@@ -13,7 +13,8 @@ class Segmenter {
       maxSegMs: 20000,    // hard cut
       minSpeechMs: 400,   // less speech than this = noise, discard
       leadMs: 400,        // keep this much audio before speech starts
-      absThresh: 0.006,
+      absThresh: 0.0012,  // minimum level that can count as speech
+      mult: 1.8,          // speech must be this many times above the noise floor
     }, opts);
     this.floor = 0.01;
     this.level = 0;
@@ -31,7 +32,8 @@ class Segmenter {
     // adaptive noise floor: falls fast, rises very slowly
     if (rms < this.floor) this.floor = this.floor * 0.9 + rms * 0.1;
     else this.floor = this.floor * 0.999 + rms * 0.001;
-    const thr = Math.max(this.floor * 2.5, this.o.absThresh);
+    const thr = Math.max(this.floor * this.o.mult, this.o.absThresh);
+    this.thr = thr;
     const speech = rms > thr;
     this.speaking = speech;
 
@@ -73,6 +75,20 @@ class Segmenter {
   }
 }
 
+// Sensitivity presets: [absThresh, mult]
+const SENS = { max: [0.0004, 1.4], high: [0.0012, 1.8], mid: [0.003, 2.2], low: [0.006, 2.6] };
+
+// Bring quiet (far-away) speech up to a healthy level before sending it to recognition
+function normalize(f32, target = 0.9, maxGain = 12) {
+  let peak = 0; for (let i = 0; i < f32.length; i++) { const a = Math.abs(f32[i]); if (a > peak) peak = a; }
+  if (peak < 1e-5) return f32;
+  const g = Math.min(maxGain, target / peak);
+  if (g <= 1.05) return f32;
+  const out = new Float32Array(f32.length);
+  for (let i = 0; i < f32.length; i++) out[i] = f32[i] * g;
+  return out;
+}
+
 function downsample(f32, inRate, outRate = 16000) {
   if (inRate <= outRate) return f32;
   const ratio = inRate / outRate, n = Math.floor(f32.length / ratio), out = new Float32Array(n);
@@ -98,4 +114,4 @@ function encodeWav(f32, rate) {
   return buf;
 }
 
-if (typeof module !== "undefined") module.exports = { Segmenter, downsample, encodeWav };
+if (typeof module !== "undefined") module.exports = { Segmenter, downsample, encodeWav, normalize, SENS };
